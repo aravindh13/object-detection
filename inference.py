@@ -66,46 +66,28 @@ class NMSProcessor:
                 pred_box = pred[:, 1+num_classes:5+num_classes, :, :]  # Box regression
                 pred_temp = pred[:, 5+num_classes, :, :]  # Temperature
                 
-                # Find detections above confidence threshold
-                conf_mask = pred_obj > self.conf_threshold
-                
-                if conf_mask.any():
-                    # Get coordinates of high-confidence detections
-                    conf_indices = torch.where(conf_mask)
-                    
-                    for i in range(len(conf_indices[0])):
-                        anchor_idx = conf_indices[0][i].item()
-                        grid_y = conf_indices[1][i].item()
-                        grid_x = conf_indices[2][i].item()
-                        
-                        # Get confidence and class
-                        confidence = pred_obj[anchor_idx, grid_y, grid_x].item()
-                        class_scores = pred_cls[anchor_idx, :, grid_y, grid_x]
-                        class_id = torch.argmax(class_scores).item()
-                        class_conf = class_scores[class_id].item()
-                        
-                        # Get box coordinates
-                        box_x = (grid_x + pred_box[anchor_idx, 0, grid_y, grid_x].item()) * stride
-                        box_y = (grid_y + pred_box[anchor_idx, 1, grid_y, grid_x].item()) * stride
-                        box_w = pred_box[anchor_idx, 2, grid_y, grid_x].item() * stride
-                        box_h = pred_box[anchor_idx, 3, grid_y, grid_x].item() * stride
-                        
-                        # Get temperature
-                        temperature = pred_temp[anchor_idx, grid_y, grid_x].item()
-                        
-                        # Convert to normalized coordinates
-                        x_center = box_x / input_size
-                        y_center = box_y / input_size
-                        width = box_w / input_size
-                        height = box_h / input_size
-                        
-                        detections.append({
-                            'bbox': [x_center, y_center, width, height],
-                            'confidence': confidence * class_conf,
-                            'class_id': class_id,
-                            'temperature': temperature
-                        })
-            
+                # Vectorized decode of all cells above the objectness threshold
+                idx = torch.nonzero(pred_obj > self.conf_threshold, as_tuple=True)
+                if idx[0].numel() == 0:
+                    continue
+                a_i, gy, gx = idx
+                obj = pred_obj[idx]
+                class_conf, class_id = pred_cls[a_i, :, gy, gx].max(dim=1)
+                box = pred_box[a_i, :, gy, gx]
+                xc = (gx + box[:, 0]) * stride / input_size
+                yc = (gy + box[:, 1]) * stride / input_size
+                bw = box[:, 2] * stride / input_size
+                bh = box[:, 3] * stride / input_size
+                temp = pred_temp[idx]
+                conf = obj * class_conf
+                for k in range(len(obj)):
+                    detections.append({
+                        'bbox': [xc[k].item(), yc[k].item(), bw[k].item(), bh[k].item()],
+                        'confidence': conf[k].item(),
+                        'class_id': class_id[k].item(),
+                        'temperature': temp[k].item()
+                    })
+
             # Apply NMS
             if detections:
                 detections = self._apply_nms(detections)
@@ -127,7 +109,9 @@ class NMSProcessor:
         scores = torch.tensor([det['confidence'] for det in detections])
         
         # Apply NMS
-        keep_indices = self._nms(boxes, scores, self.nms_threshold)
+        # Class-aware: offset boxes per class so different classes never suppress each other
+        cls = torch.tensor([det['class_id'] for det in detections], dtype=boxes.dtype)
+        keep_indices = self._nms(boxes + cls[:, None] * 10.0, scores, self.nms_threshold)
         
         return [detections[i] for i in keep_indices]
     

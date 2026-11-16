@@ -44,9 +44,9 @@ with st.sidebar:
     model_path = st.text_input("Model path", value=default_model)
     device = st.selectbox("Device", ["auto", "cpu"], index=0)
     input_size = st.number_input("Input size", min_value=160, max_value=1280, value=640, step=32)
-    conf_thr = st.slider("Confidence threshold", 0.0, 1.0, 0.9, 0.01)
-    nms_thr = st.slider("NMS threshold", 0.0, 1.0, 0.2, 0.01)
-    max_detections = st.number_input("Max detections per stream", min_value=1, max_value=50, value=5, step=1)
+    conf_thr = st.slider("Confidence threshold", 0.0, 1.0, 0.5, 0.01)
+    nms_thr = st.slider("NMS threshold", 0.0, 1.0, 0.45, 0.01)
+    max_detections = st.number_input("Max detections per stream", min_value=1, max_value=50, value=20, step=1)
     frame_skip = st.number_input("Process every N frames", min_value=1, max_value=10, value=2, step=1)
 
     st.markdown("---")
