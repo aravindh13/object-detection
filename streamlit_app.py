@@ -22,9 +22,21 @@ def cleanup_temp_files():
 # Register cleanup function
 atexit.register(cleanup_temp_files)
 
-st.set_page_config(page_title="RGB+Thermal Detection", layout="wide")
+st.set_page_config(page_title="RGB+Thermal Detection", page_icon="🛰️", layout="wide")
 
-st.title("RGB + Thermal Object Detection - Streamlit UI")
+st.markdown("""
+<style>
+.block-container {padding-top: 1.5rem;}
+.hero {background: linear-gradient(90deg,#0f2027,#203a43,#2c5364); color:#fff;
+       padding: 1.2rem 1.5rem; border-radius: 12px; margin-bottom: 1rem;}
+.hero h1 {margin:0; font-size:1.9rem;} .hero p {margin:.2rem 0 0; opacity:.8;}
+div[data-testid="stMetric"] {background: rgba(128,128,128,.12); border-radius: 10px; padding: .6rem .9rem;}
+div.stButton > button {width:100%; border-radius:8px; font-weight:600;}
+img {border-radius: 8px;}
+</style>
+<div class="hero"><h1>🛰️ RGB + Thermal Object Detection</h1>
+<p>Two-stream drone detection with live RGB and thermal inference</p></div>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Configuration")
@@ -70,11 +82,9 @@ with st.sidebar:
         thermal_source = st.text_input("Thermal camera index", value="1")
         max_frames = st.number_input("Max frames (0 = unlimited)", min_value=0, max_value=10000, value=0, step=1)
 
-    run_btn = st.button("Start")
+    run_btn = st.button("▶ Start detection", type="primary")
 
 status = st.empty()
-col1, col2 = st.columns(2)
-view = st.empty()
 
 @st.cache_resource(show_spinner=False)
 def load_infer(model_path: str, device: str, input_size: int, conf: float, nms: float):
@@ -214,7 +224,7 @@ if run_btn:
         status.error(f"Could not open Thermal source: {thermal_source}. Provide a file path, directory with media, or camera index.")
         st.stop()
 
-    status.info("Streaming... press Stop in the toolbar or refresh to end.")
+    status.info("⏳ Streaming... press Stop in the toolbar or refresh to end.")
     
     # Create side-by-side columns for RGB and Thermal
     rgb_col, thermal_col = st.columns(2)
@@ -229,7 +239,10 @@ if run_btn:
         thermal_frame_slot = st.empty()
         thermal_info_slot = st.empty()
     
-    # Overall info slot
+    # Live metrics + progress
+    m_fps, m_frame, m_rgb, m_thr = st.columns(4)
+    fps_m, frame_m, rgb_m, thr_m = m_fps.empty(), m_frame.empty(), m_rgb.empty(), m_thr.empty()
+    progress = st.progress(0.0)
     overall_info_slot = st.empty()
 
     frames_done = 0
@@ -291,7 +304,12 @@ if run_btn:
         # Update info
         rgb_info_slot.write(f"RGB: {len(rgb_dets)} total, {min(len(rgb_dets), max_detections)} shown")
         thermal_info_slot.write(f"Thermal: {len(thermal_dets)} total, {min(len(thermal_dets), max_detections)} shown")
-        overall_info_slot.write(f"Processing FPS: {fps:.1f} | Frame: {frames_done} | Skip: {frame_skip}")
+        fps_m.metric("FPS", f"{fps:.1f}")
+        frame_m.metric("Frame", frames_done)
+        rgb_m.metric("RGB detections", len(rgb_dets))
+        thr_m.metric("Thermal detections", len(thermal_dets))
+        if rgb_frame_count > 0:
+            progress.progress(min(1.0, frames_done / rgb_frame_count))
 
         frames_done += 1
         if max_frames > 0 and frames_done >= max_frames:
@@ -309,4 +327,5 @@ if run_btn:
         safe_remove_file(temp_file)
     st.session_state.temp_files = []
     
-    status.success("Streaming finished.")
+    progress.progress(1.0)
+    status.success("✅ Streaming finished.")
