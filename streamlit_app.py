@@ -5,8 +5,10 @@ import numpy as np
 import streamlit as st
 import atexit
 import glob
+import csv
+import io
 
-from separate_inference import RGBOnlyInference, ThermalOnlyInference, visualize_detections
+from separate_inference import RGBOnlyInference, ThermalOnlyInference, visualize_detections, COCO_CLASSES
 
 # Cleanup function for temporary files
 def cleanup_temp_files():
@@ -48,6 +50,12 @@ with st.sidebar:
     nms_thr = st.slider("NMS threshold", 0.0, 1.0, 0.45, 0.01)
     max_detections = st.number_input("Max detections per stream", min_value=1, max_value=50, value=20, step=1)
     frame_skip = st.number_input("Process every N frames", min_value=1, max_value=10, value=2, step=1)
+
+    st.markdown("---")
+    st.subheader("Analysis")
+    selected_classes = st.multiselect("Class filter (empty = all)", COCO_CLASSES)
+    temp_alert = st.number_input("Temperature alert threshold (model units, 0 = off)", min_value=0.0, value=0.0, step=0.05)
+    save_video = st.checkbox("Save annotated videos", value=False)
 
     st.markdown("---")
     st.subheader("Sources")
@@ -247,6 +255,9 @@ if run_btn:
 
     frames_done = 0
     prev = time.time()
+    log_rows = []
+    writers = {}
+    os.makedirs("outputs", exist_ok=True)
     
     # Get video properties for better synchronization
     rgb_fps = cap_rgb.get(cv2.CAP_PROP_FPS)
@@ -279,9 +290,24 @@ if run_btn:
         rgb_dets = rgb_infer.predict(rgb_for_model)
         thermal_dets = thermal_infer.predict(thr_gray)
         
+        keep_ids = {COCO_CLASSES.index(c) for c in selected_classes}
+        if keep_ids:
+            rgb_dets = [d for d in rgb_dets if d["class_id"] in keep_ids]
+            thermal_dets = [d for d in thermal_dets if d["class_id"] in keep_ids]
+        alerts = [d for d in thermal_dets if temp_alert > 0 and d["temperature"] > temp_alert]
+
+        for stream, dets in (("rgb", rgb_dets), ("thermal", thermal_dets)):
+            for d in dets:
+                log_rows.append([frames_done, stream, COCO_CLASSES[d["class_id"]] if d["class_id"] < len(COCO_CLASSES) else d["class_id"],
+                                 round(d["confidence"], 4), *[round(v, 4) for v in d["bbox"]], round(d["temperature"], 4)])
+
         # Visualize detections separately
         rgb_vis = visualize_detections(f_rgb.copy(), rgb_dets, rgb_infer.class_names, "RGB", max_detections)
         thermal_vis = visualize_detections(f_thr.copy(), thermal_dets, thermal_infer.class_names, "Thermal", max_detections)
+
+        if alerts:
+            cv2.putText(thermal_vis, f"ALERT: {len(alerts)} hot object(s)", (10, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         # FPS calculation
         now = time.time()
@@ -297,6 +323,15 @@ if run_btn:
         cv2.putText(thermal_vis, f"Frame: {frames_done}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(thermal_vis, f"Thermal Detections: {len(thermal_dets)}", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
+        if save_video:
+            for name, img in (("rgb", rgb_vis), ("thermal", thermal_vis)):
+                if name not in writers:
+                    path = os.path.join("outputs", f"annotated_{name}.mp4")
+                    out_fps = max(1.0, (rgb_fps or 20.0) / frame_skip)
+                    writers[name] = (cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), out_fps,
+                                                     (img.shape[1], img.shape[0])), path)
+                writers[name][0].write(img)
+
         # Display side by side
         rgb_frame_slot.image(cv2.cvtColor(rgb_vis, cv2.COLOR_BGR2RGB), channels="RGB")
         thermal_frame_slot.image(cv2.cvtColor(thermal_vis, cv2.COLOR_BGR2RGB), channels="RGB")
@@ -307,7 +342,7 @@ if run_btn:
         fps_m.metric("FPS", f"{fps:.1f}")
         frame_m.metric("Frame", frames_done)
         rgb_m.metric("RGB detections", len(rgb_dets))
-        thr_m.metric("Thermal detections", len(thermal_dets))
+        thr_m.metric("Thermal detections", len(thermal_dets), delta=f"{len(alerts)} hot" if alerts else None, delta_color="inverse")
         if rgb_frame_count > 0:
             progress.progress(min(1.0, frames_done / rgb_frame_count))
 
@@ -317,6 +352,14 @@ if run_btn:
 
     cap_rgb.release()
     cap_thr.release()
+    for w, _ in writers.values():
+        w.release()
+
+    # Persist results so download buttons survive Streamlit reruns
+    buf = io.StringIO()
+    csv.writer(buf).writerows([["frame", "stream", "class", "confidence", "x", "y", "w", "h", "temperature"], *log_rows])
+    st.session_state.log_csv = buf.getvalue()
+    st.session_state.videos = [p for _, p in writers.values()]
     
     # Clean up temporary files safely
     safe_remove_file(rgb_temp_path)
@@ -329,3 +372,14 @@ if run_btn:
     
     progress.progress(1.0)
     status.success("✅ Streaming finished.")
+
+
+# Results (outside the run block so clicking a download doesn't discard them)
+if st.session_state.get("log_csv"):
+    st.markdown("### 📥 Results")
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("Detections CSV", st.session_state.log_csv, "detections.csv", "text/csv")
+    for col, path in zip((c2, c3), st.session_state.get("videos", [])):
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                col.download_button(f"{os.path.basename(path)}", f.read(), os.path.basename(path), "video/mp4")
